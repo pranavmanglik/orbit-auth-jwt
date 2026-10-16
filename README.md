@@ -35,15 +35,24 @@ authenticator = BearerAuthenticator(
 )
 ```
 
-The verifier requires an explicit algorithm allowlist, rejects `none`, requires subject, token ID,
-issued-at, and expiry claims, bounds input and policy metadata, validates scopes, and returns
-`orbit-auth`'s payload-safe `Token` model. One verifier may allow multiple algorithms from the same key
-family for controlled key rotation, but it rejects allowlists that mix HMAC (`HS*`) with asymmetric
-algorithms to prevent algorithm-confusion configurations. It does not issue tokens, fetch JWKS
-keys, manage secrets, or provide key rotation. Prefer asymmetric signing keys for distributed
-services and load key material from a secret manager; never commit production signing secrets.
-Configure issuer, audience, expiry, and revocation policy for the deployment. Keep asymmetric
-verification keys public-only; never pass the signing private key to a verifier.
+The verifier requires an explicit algorithm allowlist, an expected issuer, and one or more intended
+audiences. It rejects `none`, requires subject, token ID, issued-at, and expiry claims, bounds input
+and policy metadata, validates scopes, and returns `orbit-auth`'s payload-safe `Token` model. PyJWT
+validates the configured issuer, audience, expiry, and not-before claim when present; applications
+should issue tokens with a short expiry and only the claims required by their access policy.
+
+Use a separate verifier for each issuer/audience trust policy. A tuple of audiences means every
+listed audience is trusted by that verifier, so include only audiences intended for the same
+application boundary. One verifier may allow multiple algorithms from the same key family for
+controlled key rotation, but it rejects allowlists that mix HMAC (`HS*`) with asymmetric algorithms
+to prevent algorithm-confusion configurations. Keep the allowlist narrow.
+
+HMAC verification uses a shared secret that can also mint tokens. Prefer asymmetric signing for
+distributed services; give verifiers public keys only and protect signing private keys separately.
+Load key material from a secret manager and never commit production keys. This package does not
+issue tokens, fetch or refresh JWKS keys, rotate keys, store credentials, or check revocation. Compose
+it with an appropriate key-distribution and revocation strategy where those are required. Revocation
+and authorization policy are separate concerns from signature verification.
 
 ## Documentation
 
@@ -60,8 +69,11 @@ mypy
 
 ## Status
 
-This package is pre-alpha; its API is not stable and it is not yet a published release. It supports
-Python 3.11 through 3.14.
+This is a **v0.1.0-alpha review candidate**. On CPython 3.11.14, 3.12.14, 3.13.15, and 3.14.7,
+all 31 tests, Ruff lint and format checks, strict mypy, dependency audits, and wheel/sdist builds pass
+locally. Hosted CI, external key rotation/JWKS behavior, and identity-provider interoperability
+remain release gates. The local source is not a published release; its API may change before stable
+release.
 
 Licensed under Apache-2.0.
 

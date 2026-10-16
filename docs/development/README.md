@@ -12,9 +12,16 @@ pytest
 ruff check src tests
 ruff format --check src tests
 mypy
+pip-audit --skip-editable --progress-spinner off
 ```
 
 Optional SDKs and live-service tests are described by the package README. Do not run an opt-in live test against a shared or production service unless its own documentation explicitly supports that use.
+
+The current local quality matrix passes on CPython 3.11, 3.12, 3.13, and 3.14: all 31 tests, Ruff
+lint and format checks, strict mypy, dependency audits with no known vulnerabilities, and wheel/sdist
+builds pass on each interpreter. Tests use local keys and deterministic verification cases; hosted CI,
+external key rotation/JWKS behavior, and identity-provider interoperability remain separate
+validation gates.
 
 ## Contribution expectations
 

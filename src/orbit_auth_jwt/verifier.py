@@ -29,6 +29,7 @@ _MAX_TEXT = 255
 _MAX_TOKEN_LENGTH = 16_384
 _MAX_LEEWAY_SECONDS = 86_400
 _HMAC_ALGORITHMS = frozenset({"HS256", "HS384", "HS512"})
+_HMAC_MINIMUM_KEY_BYTES = {"HS256": 32, "HS384": 48, "HS512": 64}
 _CRYPTO_ALGORITHM_PREFIXES = ("RS", "ES", "PS")
 _CRYPTO_ALGORITHMS = frozenset({"EdDSA"})
 
@@ -36,21 +37,28 @@ _CRYPTO_ALGORITHMS = frozenset({"EdDSA"})
 class PyJWTVerifier:
     """Verify JWT credentials through PyJWT and return Orbit Auth's provider-neutral token.
 
-    An explicit algorithm allowlist and required claims prevent accepting unsigned or incomplete
-    tokens. Token issuance, JWKS discovery, key rotation, and credential storage are intentionally
-    outside this verifier.
+    An explicit algorithm allowlist, pinned issuer and audience, and required claims prevent
+    accepting unsigned, incomplete, or cross-service tokens. Token issuance, JWKS discovery, key
+    rotation, and credential storage are intentionally outside this verifier.
     """
 
     def __init__(
         self,
         key: Any,
         *,
+        issuer: str,
+        audience: str | tuple[str, ...],
         algorithms: tuple[str, ...] = ("HS256",),
-        issuer: str | None = None,
-        audience: str | tuple[str, ...] | None = None,
         leeway: float = 0,
     ) -> None:
-        """Freeze a bounded verifier policy for one key and explicit algorithm allowlist."""
+        """Freeze a bounded policy pinned to one issuer and one or more intended audiences.
+
+        Both trust boundaries are mandatory. Omitting either would let a valid signature alone
+        determine where a token is trusted, which is unsafe when keys or issuers serve multiple
+        applications. Use separate verifier instances for distinct issuer/audience policies. HMAC
+        algorithms accept text or byte keys only and enforce each algorithm's minimum byte length;
+        this length check does not prove that the secret was generated randomly.
+        """
         if (
             not isinstance(algorithms, tuple)
             or not algorithms
@@ -68,6 +76,19 @@ class PyJWTVerifier:
             algorithm not in _HMAC_ALGORITHMS for algorithm in algorithms
         ):
             raise ValueError("JWT algorithm allowlists cannot mix HMAC and asymmetric families.")
+        if any(algorithm in _HMAC_ALGORITHMS for algorithm in algorithms):
+            if isinstance(key, str):
+                key_bytes = key.encode("utf-8")
+            elif isinstance(key, bytes):
+                key_bytes = key
+            else:
+                raise ValueError("HMAC JWT keys must be supplied as text or bytes.")
+            minimum_key_bytes = max(_HMAC_MINIMUM_KEY_BYTES[algorithm] for algorithm in algorithms)
+            if len(key_bytes) < minimum_key_bytes:
+                raise ValueError(
+                    f"HMAC JWT keys must be at least {minimum_key_bytes} bytes for the "
+                    "configured algorithms."
+                )
         if (
             any(_requires_cryptography(algorithm) for algorithm in algorithms)
             and find_spec("cryptography") is None
@@ -83,22 +104,21 @@ class PyJWTVerifier:
             or not 0 <= leeway <= _MAX_LEEWAY_SECONDS
         ):
             raise ValueError("JWT leeway must be finite and between zero and one day.")
-        if issuer is not None and not _valid_text(issuer):
+        if not _valid_text(issuer):
             raise ValueError("JWT issuer must be bounded, nonempty printable text.")
-        if audience is not None:
-            audiences: tuple[str, ...]
-            if isinstance(audience, str):
-                audiences = (audience,)
-            elif isinstance(audience, tuple):
-                audiences = audience
-            else:
-                raise ValueError("JWT audience must be a nonempty string or tuple of strings.")
-            if (
-                not audiences
-                or len(audiences) > _MAX_AUDIENCES
-                or any(not _valid_text(item) for item in audiences)
-            ):
-                raise ValueError("JWT audience values must be bounded printable strings.")
+        audiences: tuple[str, ...]
+        if isinstance(audience, str):
+            audiences = (audience,)
+        elif isinstance(audience, tuple):
+            audiences = audience
+        else:
+            raise ValueError("JWT audience must be a nonempty string or tuple of strings.")
+        if (
+            not audiences
+            or len(audiences) > _MAX_AUDIENCES
+            or any(not _valid_text(item) for item in audiences)
+        ):
+            raise ValueError("JWT audience values must be bounded printable strings.")
         self._key = key
         self._algorithms = algorithms
         self._issuer = issuer

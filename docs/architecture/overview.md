@@ -37,15 +37,23 @@ authenticator = BearerAuthenticator(
 )
 ```
 
-The verifier requires an explicit algorithm allowlist, rejects `none`, requires subject, token ID,
-issued-at, and expiry claims, bounds input and policy metadata, validates scopes, and returns
-`orbit-auth`'s payload-safe `Token` model. One verifier may allow multiple algorithms from the same key
-family for controlled key rotation, but it rejects allowlists that mix HMAC (`HS*`) with asymmetric
-algorithms to prevent algorithm-confusion configurations. It does not issue tokens, fetch JWKS
-keys, manage secrets, or provide key rotation. Prefer asymmetric signing keys for distributed
-services and load key material from a secret manager; never commit production signing secrets.
-Configure issuer, audience, expiry, and revocation policy for the deployment. Keep asymmetric
-verification keys public-only; never pass the signing private key to a verifier.
+The verifier requires an explicit algorithm allowlist, expected issuer, and intended audience. It
+rejects `none`, requires subject, token ID, issued-at, and expiry claims, bounds input and policy
+metadata, validates scopes, and returns `orbit-auth`'s payload-safe `Token` model. PyJWT checks the
+configured issuer, audience, expiration, and not-before claim when present. Keep token lifetimes
+short and define authorization and revocation policy at the application boundary.
+
+Use separate verifier instances for distinct issuer/audience trust policies. Every value in an
+audience tuple is accepted by that verifier; do not combine unrelated services in one tuple. One
+verifier may allow multiple algorithms from the same key family for controlled key rotation, but it
+rejects allowlists that mix HMAC (`HS*`) with asymmetric algorithms to prevent algorithm-confusion
+configurations. Keep the allowlist narrow.
+
+HMAC verification uses a shared secret that can also sign tokens. Prefer asymmetric signing for
+distributed services, give verifiers public keys only, and protect signing private keys in a secret
+manager. This package does not issue tokens, fetch or refresh JWKS keys, rotate keys, store
+credentials, or check revocation. Use a separate key-distribution and revocation strategy where
+those capabilities are needed.
 
 ## Declared dependencies
 
@@ -70,8 +78,10 @@ Representative implementation files in this checkout:
 
 ## Status
 
-This package is pre-alpha; its API is not stable and it is not yet a published release. It supports
-Python 3.11 through 3.14.
+This package is a v0.1.0-alpha review candidate. Its local Python 3.11–3.14 test, lint, type,
+dependency-audit, and build matrix passes; hosted CI, external key rotation/JWKS behavior, and
+identity-provider interoperability remain separate release gates. The API may change before stable
+release.
 
 Licensed under Apache-2.0.
 

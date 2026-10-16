@@ -25,6 +25,8 @@ from orbit_auth import Token
 
 from orbit_auth_jwt import PyJWTVerifier
 
+_TEST_HMAC_KEY = "test-key-with-more-than-32-bytes-of-random-looking-material"
+
 
 def test_verifier_maps_verified_claims(monkeypatch: pytest.MonkeyPatch) -> None:
     now = datetime.now(UTC).timestamp()
@@ -43,7 +45,7 @@ def test_verifier_maps_verified_claims(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setitem(sys.modules, "jwt", SimpleNamespace(decode=decode))
     token = PyJWTVerifier(
-        "secret", issuer="https://issuer.example", audience="api", algorithms=("HS256",)
+        _TEST_HMAC_KEY, issuer="https://issuer.example", audience="api", algorithms=("HS256",)
     ).verify("compact")
     assert isinstance(token, Token)
     assert token.subject == "user-1"
@@ -51,6 +53,8 @@ def test_verifier_maps_verified_claims(monkeypatch: pytest.MonkeyPatch) -> None:
     kwargs = calls["kwargs"]
     assert isinstance(kwargs, dict)
     assert kwargs["algorithms"] == ["HS256"]
+    assert kwargs["issuer"] == "https://issuer.example"
+    assert kwargs["audience"] == "api"
     assert kwargs["options"] == {"require": ["sub", "jti", "iat", "exp"]}
 
 
@@ -87,6 +91,34 @@ def test_verifier_accepts_a_real_signed_token_and_rejects_tampering() -> None:
         verifier.verify(f"{header}.{payload}.{changed_signature}")
 
 
+@pytest.mark.parametrize(
+    "claim, value",
+    [("iss", "https://other-issuer.example"), ("aud", "another-service")],
+)
+def test_verifier_rejects_tokens_outside_its_issuer_and_audience(claim: str, value: str) -> None:
+    now = int(datetime.now(UTC).timestamp())
+    claims: dict[str, object] = {
+        "sub": "user-1",
+        "jti": "token-1",
+        "iat": now,
+        "exp": now + 60,
+        "iss": "https://issuer.example",
+        "aud": "orbit-api",
+    }
+    claims[claim] = value
+    test_key = "test-secret-with-at-least-32-bytes-of-entropy"
+    credential = jwt.encode(claims, test_key, algorithm="HS256")
+    verifier = PyJWTVerifier(
+        test_key,
+        algorithms=("HS256",),
+        issuer="https://issuer.example",
+        audience="orbit-api",
+    )
+
+    with pytest.raises(ValueError, match="invalid"):
+        verifier.verify(credential)
+
+
 def test_verifier_accepts_a_real_rsa_signed_token() -> None:
     """The documented asymmetric extra supports public-key verification end to end."""
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -101,12 +133,24 @@ def test_verifier_accepts_a_real_rsa_signed_token() -> None:
     )
     now = int(datetime.now(UTC).timestamp())
     credential = jwt.encode(
-        {"sub": "rsa-user", "jti": "rsa-token", "iat": now, "exp": now + 60},
+        {
+            "sub": "rsa-user",
+            "jti": "rsa-token",
+            "iat": now,
+            "exp": now + 60,
+            "iss": "https://issuer.example",
+            "aud": "orbit-api",
+        },
         private_key_pem,
         algorithm="RS256",
     )
 
-    token = PyJWTVerifier(public_key_pem, algorithms=("RS256",)).verify(credential)
+    token = PyJWTVerifier(
+        public_key_pem,
+        algorithms=("RS256",),
+        issuer="https://issuer.example",
+        audience="orbit-api",
+    ).verify(credential)
 
     assert token.subject == "rsa-user"
     assert token.token_id == "rsa-token"
@@ -118,7 +162,12 @@ def test_asymmetric_configuration_explains_missing_optional_extra(
     """Users get a configuration hint before serving traffic without crypto support."""
     monkeypatch.setattr("orbit_auth_jwt.verifier.find_spec", lambda _name: None)
     with pytest.raises(ImportError, match=r"orbit-auth-jwt\[asymmetric\]"):
-        PyJWTVerifier("public-key", algorithms=("RS256",))
+        PyJWTVerifier(
+            "public-key",
+            algorithms=("RS256",),
+            issuer="https://issuer.example",
+            audience="orbit-api",
+        )
 
 
 def test_verifier_hides_backend_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,7 +176,9 @@ def test_verifier_hides_backend_failures(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setitem(sys.modules, "jwt", SimpleNamespace(decode=decode))
     with pytest.raises(ValueError, match="invalid") as error:
-        PyJWTVerifier("secret").verify("compact")
+        PyJWTVerifier(_TEST_HMAC_KEY, issuer="https://issuer.example", audience="orbit-api").verify(
+            "compact"
+        )
     assert "signature details" not in str(error.value)
     assert error.value.__cause__ is None
     assert error.value.__suppress_context__
@@ -152,13 +203,43 @@ def test_verifier_hides_backend_failures(monkeypatch: pytest.MonkeyPatch) -> Non
 )
 def test_verifier_rejects_unbounded_or_unsafe_policy(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
-        PyJWTVerifier("secret", **kwargs)  # type: ignore[arg-type]
+        policy: dict[str, object] = {
+            "issuer": "https://issuer.example",
+            "audience": "orbit-api",
+        }
+        policy.update(kwargs)
+        PyJWTVerifier(_TEST_HMAC_KEY, **policy)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("missing", ["issuer", "audience"])
+def test_verifier_policy_requires_both_trust_boundaries(missing: str) -> None:
+    policy: dict[str, str] = {
+        "issuer": "https://issuer.example",
+        "audience": "orbit-api",
+    }
+    del policy[missing]
+    with pytest.raises(TypeError):
+        PyJWTVerifier(_TEST_HMAC_KEY, **policy)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "minimum_bytes"), [("HS256", 32), ("HS384", 48), ("HS512", 64)]
+)
+def test_hmac_verifier_requires_rfc_minimum_key_length(algorithm: str, minimum_bytes: int) -> None:
+    policy = {"issuer": "https://issuer.example", "audience": "orbit-api"}
+    with pytest.raises(ValueError, match=f"at least {minimum_bytes} bytes"):
+        PyJWTVerifier("x" * (minimum_bytes - 1), algorithms=(algorithm,), **policy)
+
+    verifier = PyJWTVerifier("x" * minimum_bytes, algorithms=(algorithm,), **policy)
+    assert verifier is not None
 
 
 @pytest.mark.parametrize("credential", ["", 123])
 def test_verifier_rejects_empty_or_non_string_credentials(credential: object) -> None:
     with pytest.raises(ValueError, match="invalid"):
-        PyJWTVerifier("secret").verify(credential)  # type: ignore[arg-type]
+        PyJWTVerifier(_TEST_HMAC_KEY, issuer="https://issuer.example", audience="orbit-api").verify(
+            credential
+        )  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -175,7 +256,9 @@ def test_verifier_rejects_malformed_claims(
 ) -> None:
     monkeypatch.setitem(sys.modules, "jwt", SimpleNamespace(decode=lambda *args, **kwargs: claims))
     with pytest.raises(ValueError, match="invalid"):
-        PyJWTVerifier("secret").verify("compact")
+        PyJWTVerifier(_TEST_HMAC_KEY, issuer="https://issuer.example", audience="orbit-api").verify(
+            "compact"
+        )
 
 
 def test_verifier_bounds_scope_claims(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,4 +271,6 @@ def test_verifier_bounds_scope_claims(monkeypatch: pytest.MonkeyPatch) -> None:
     }
     monkeypatch.setitem(sys.modules, "jwt", SimpleNamespace(decode=lambda *args, **kwargs: claims))
     with pytest.raises(ValueError, match="invalid"):
-        PyJWTVerifier("secret").verify("compact")
+        PyJWTVerifier(_TEST_HMAC_KEY, issuer="https://issuer.example", audience="orbit-api").verify(
+            "compact"
+        )
